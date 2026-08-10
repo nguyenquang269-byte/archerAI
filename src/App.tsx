@@ -72,6 +72,10 @@ export default function App() {
   const [time, setTime] = useState(ROUND_SECONDS);
   const [lastHit, setLastHit] = useState<number | null>(null);
   const [handsReady, setHandsReady] = useState(false);
+  const [cameraActive, setCameraActive] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+
+  const isStartingRef = useRef<boolean>(false);
 
   useEffect(() => { runningRef.current = running; }, [running]);
   useEffect(() => { mutedRef.current = muted; }, [muted]);
@@ -237,43 +241,110 @@ export default function App() {
     rafRef.current = requestAnimationFrame(loop);
   };
 
-  const startCamera = async () => {
+  const startCamera = async (isAutoStart = false) => {
+    if (isStartingRef.current) return;
+    if (cameraActive && videoRef.current?.srcObject) return;
+
+    isStartingRef.current = true;
     setLoading(true);
-    setStatus("Đang tải mô hình nhận diện tay...");
+    setCameraError(null);
+    setStatus("Đang yêu cầu quyền truy cập camera...");
     try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("TRINHDRUYET_KHONG_HO_TRO");
+      }
+
+      let stream = videoRef.current?.srcObject as MediaStream | null;
+      if (!stream || !stream.active) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: "user",
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            },
+            audio: false,
+          });
+        } catch (fallbackErr) {
+          // Fallback to basic video constraints if ideal resolution is rejected
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: false,
+          });
+        }
+      }
+
+      if (videoRef.current) {
+        if (videoRef.current.srcObject !== stream) {
+          videoRef.current.srcObject = stream;
+        }
+        try {
+          await videoRef.current.play();
+        } catch (playErr: any) {
+          if (playErr.name !== "AbortError" && !playErr.message?.includes("interrupted")) {
+            console.warn("Video play exception:", playErr);
+          }
+        }
+        setCameraActive(true);
+      }
+
+      setStatus("Đang tải mô hình nhận diện AI...");
       if (!landmarkerRef.current) {
         const vision = await FilesetResolver.forVisionTasks(WASM_URL);
-        landmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
-          baseOptions: { modelAssetPath: MODEL_URL, delegate: "GPU" },
-          runningMode: "VIDEO",
-          numHands: 2,
-          minHandDetectionConfidence: 0.55,
-          minHandPresenceConfidence: 0.55,
-          minTrackingConfidence: 0.55,
-        });
+        try {
+          landmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
+            baseOptions: { modelAssetPath: MODEL_URL, delegate: "GPU" },
+            runningMode: "VIDEO",
+            numHands: 2,
+            minHandDetectionConfidence: 0.5,
+            minHandPresenceConfidence: 0.5,
+            minTrackingConfidence: 0.5,
+          });
+        } catch (gpuError) {
+          console.warn("GPU delegate failed, falling back to CPU:", gpuError);
+          landmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
+            baseOptions: { modelAssetPath: MODEL_URL, delegate: "CPU" },
+            runningMode: "VIDEO",
+            numHands: 2,
+            minHandDetectionConfidence: 0.5,
+            minHandPresenceConfidence: 0.5,
+            minTrackingConfidence: 0.5,
+          });
+        }
       }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: false,
-      });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
+
       resizeCanvas();
       cancelAnimationFrame(rafRef.current);
       loop();
-      setStatus("Camera đã sẵn sàng");
-    } catch (err) {
-      console.error(err);
-      setStatus("Không mở được camera. Hãy cấp quyền camera và thử lại.");
+      setStatus("Camera & AI sẵn sàng");
+    } catch (err: any) {
+      if (err.name === "AbortError" || err.message?.includes("interrupted")) {
+        return;
+      }
+      console.warn("Camera access result:", err?.name || err?.message || err);
+      setCameraActive(false);
+      let msg = "Không mở được camera. Hãy bấm 'Bật Camera' và cấp quyền truy cập.";
+      if (err.message === "TRINHDRUYET_KHONG_HO_TRO") {
+        msg = "Trình duyệt hoặc môi trường iframe không hỗ trợ truy cập Camera.";
+      } else if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+        msg = "Quyền truy cập camera bị từ chối. Vui lòng bấm 'Cho phép' khi trình duyệt hỏi.";
+      } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
+        msg = "Không tìm thấy thiết bị camera trên máy tính/điện thoại của bạn.";
+      } else if (err.name === "NotReadableError" || err.name === "TrackStartError") {
+        msg = "Camera đang được ứng dụng khác sử dụng. Vui lòng đóng ứng dụng đó và thử lại.";
+      }
+      setCameraError(msg);
+      setStatus(msg);
     } finally {
       setLoading(false);
+      isStartingRef.current = false;
     }
   };
 
   const startRound = async () => {
-    if (!videoRef.current?.srcObject) await startCamera();
+    if (!cameraActive) {
+      await startCamera();
+    }
     setScore(0);
     setShots(0);
     setLastHit(null);
@@ -286,14 +357,18 @@ export default function App() {
   useEffect(() => {
     resizeCanvas();
     window.addEventListener("resize", resizeCanvas);
+    
+    // Attempt auto camera start
+    startCamera(true);
+
     return () => {
       window.removeEventListener("resize", resizeCanvas);
       cancelAnimationFrame(rafRef.current);
       if (videoRef.current?.srcObject) {
         const stream = videoRef.current.srcObject as MediaStream;
         stream.getTracks().forEach((t) => t.stop());
+        videoRef.current.srcObject = null;
       }
-      landmarkerRef.current?.close();
     };
   }, []);
 
@@ -319,81 +394,126 @@ export default function App() {
   }, [running, score, best]);
 
   return (
-    <main id="archery-main" className="min-h-screen bg-slate-950 text-white p-4 md:p-6 font-sans">
-      <div className="mx-auto max-w-6xl">
-        <header id="game-header" className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <p className="text-xs font-bold uppercase tracking-[0.28em] text-cyan-300">Motion game</p>
-            <h1 className="text-3xl font-black tracking-tight md:text-5xl">Cung thủ Camera</h1>
-            <p className="mt-1 text-sm text-slate-400">Trỏ bằng ngón trỏ tay trước, chụm ngón cái và ngón trỏ tay còn lại để bắn.</p>
+    <main id="archery-main" className="min-h-screen bg-slate-950 text-white p-3 md:p-6 font-sans flex flex-col justify-between">
+      <div className="mx-auto w-full max-w-7xl">
+        {/* Header */}
+        <header id="game-header" className="mb-3 flex flex-wrap items-center justify-between gap-3 bg-slate-900/60 p-4 rounded-3xl border border-white/5 backdrop-blur">
+          <div className="flex items-center gap-3">
+            <div className="grid h-10 w-10 place-items-center rounded-2xl bg-cyan-500/20 text-cyan-300">
+              <Crosshair size={22} />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-xl md:text-2xl font-black tracking-tight">Cung thủ Camera</h1>
+                <span className="rounded-full bg-cyan-500/10 px-2.5 py-0.5 text-[10px] font-bold text-cyan-400 border border-cyan-500/20">
+                  AI Motion
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 hidden sm:block">Trỏ ngón trỏ để ngắm, chụm ngón tay còn lại để bắn</p>
+            </div>
           </div>
-          <div className="flex gap-2">
+
+          <div className="flex items-center gap-2">
             <button
               id="sound-toggle-btn"
               onClick={() => setMuted((v) => !v)}
-              className="rounded-2xl bg-slate-800 p-3 hover:bg-slate-700 cursor-pointer transition-colors"
+              className="rounded-2xl bg-slate-800/80 p-2.5 hover:bg-slate-700 cursor-pointer transition-colors border border-white/10"
               aria-label="Bật hoặc tắt âm thanh"
             >
-              {muted ? <VolumeX size={20} /> : <Volume2 size={20} />}
+              {muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
             </button>
             <button
               id="open-camera-btn"
-              onClick={startCamera}
+              onClick={() => startCamera()}
               disabled={loading}
-              className="flex items-center gap-2 rounded-2xl bg-slate-800 px-4 py-3 text-sm font-bold hover:bg-slate-700 disabled:opacity-50 cursor-pointer transition-colors"
+              className={`flex items-center gap-2 rounded-2xl px-4 py-2.5 text-xs font-bold transition-all cursor-pointer ${
+                cameraActive
+                  ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30"
+                  : "bg-cyan-500 text-slate-950 hover:bg-cyan-400 font-black shadow-lg shadow-cyan-500/20"
+              } disabled:opacity-50`}
             >
-              <Camera size={18} /> {loading ? "Đang mở..." : "Mở camera"}
+              <Camera size={16} />
+              {loading ? "Đang kết nối..." : cameraActive ? "Đang bật Camera" : "Bật Camera ngay"}
             </button>
           </div>
         </header>
 
-        <section id="game-arena" className="grid gap-4 lg:grid-cols-[1fr_260px]">
+        {/* Main Arena Grid - Camera Viewport Takes Center Stage */}
+        <section id="game-arena" className="grid gap-4 lg:grid-cols-[1fr_280px] items-start">
+          {/* Main Camera Viewport */}
           <div
             id="viewport-card"
-            className="relative overflow-hidden rounded-[28px] border border-white/10 bg-slate-900 shadow-2xl"
-            style={{ aspectRatio: "16 / 9" }}
+            className="relative overflow-hidden rounded-3xl border border-white/10 bg-slate-900/90 shadow-2xl min-h-[420px] sm:min-h-[520px] lg:min-h-[600px] flex items-center justify-center"
           >
             <video ref={videoRef} className="hidden" playsInline muted />
-            <canvas ref={canvasRef} className="h-full w-full" />
+            <canvas ref={canvasRef} className="h-full w-full object-cover" />
 
-            {!videoRef.current?.srcObject && (
-              <div id="camera-overlay-prompt" className="absolute inset-0 grid place-items-center bg-gradient-to-br from-cyan-950/70 to-violet-950/70 p-8 text-center">
-                <div>
-                  <div className="mx-auto mb-4 grid h-20 w-20 place-items-center rounded-full bg-white/10">
-                    <Camera size={34} />
+            {/* Overlay when Camera is NOT active */}
+            {!cameraActive && (
+              <div id="camera-overlay-prompt" className="absolute inset-0 grid place-items-center bg-slate-950/90 p-6 text-center backdrop-blur-md">
+                <div className="max-w-md">
+                  <div className="mx-auto mb-4 grid h-20 w-20 place-items-center rounded-3xl bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 shadow-inner">
+                    <Camera size={38} />
                   </div>
-                  <h2 className="text-2xl font-black">Cho phép camera để bắt đầu</h2>
-                  <p className="mx-auto mt-2 max-w-md text-sm text-slate-300">
-                    Đứng cách camera khoảng một sải tay và giữ đủ hai bàn tay trong khung hình.
+                  <h2 className="text-2xl font-black tracking-tight">Cần quyền Camera để trải nghiệm</h2>
+                  <p className="mt-2 text-sm text-slate-300 leading-relaxed">
+                    Trò chơi sử dụng camera để nhận diện chuyển động bàn tay trực tiếp trong trình duyệt. Không có dữ liệu video nào được lưu lại.
                   </p>
+
+                  {cameraError && (
+                    <div className="mt-4 rounded-2xl bg-rose-500/10 border border-rose-500/20 p-3 text-xs text-rose-300 font-medium">
+                      {cameraError}
+                    </div>
+                  )}
+
                   <button
                     id="enable-camera-btn"
-                    onClick={startCamera}
+                    onClick={() => startCamera()}
                     disabled={loading}
-                    className="mt-5 rounded-2xl bg-cyan-400 px-6 py-3 font-black text-slate-950 hover:bg-cyan-300 disabled:opacity-50 cursor-pointer transition-colors"
+                    className="mt-6 w-full rounded-2xl bg-gradient-to-r from-cyan-400 to-blue-500 py-3.5 px-6 font-black text-slate-950 shadow-lg shadow-cyan-500/25 hover:from-cyan-300 hover:to-blue-400 disabled:opacity-50 cursor-pointer transition-all text-sm"
                   >
-                    {loading ? "Đang tải..." : "Bật camera"}
+                    {loading ? "Đang kết nối camera & AI..." : "Cho phép & Bật Camera"}
                   </button>
+                  <p className="mt-3 text-[11px] text-slate-500">
+                    Nên dùng trên trình duyệt Chrome, Edge hoặc Safari
+                  </p>
                 </div>
               </div>
             )}
 
-            <div id="status-badges" className="absolute left-3 top-3 flex gap-2">
-              <span
-                className={`rounded-full px-3 py-1 text-xs font-bold backdrop-blur ${
-                  handsReady ? "bg-emerald-400/90 text-emerald-950" : "bg-slate-900/75 text-slate-200"
-                }`}
-              >
-                {handsReady ? "Đã thấy 2 tay" : "Đưa 2 tay vào khung"}
-              </span>
-              {running && <span className="rounded-full bg-rose-500 px-3 py-1 text-xs font-black">{time}s</span>}
-            </div>
+            {/* HUD Status Badges on Top Left of Camera */}
+            {cameraActive && (
+              <div id="status-badges" className="absolute left-4 top-4 flex flex-wrap gap-2 pointer-events-none">
+                <span className="flex items-center gap-1.5 rounded-full bg-slate-900/80 px-3 py-1 text-xs font-bold text-slate-200 border border-white/10 backdrop-blur">
+                  <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span> LIVE
+                </span>
+                <span
+                  className={`rounded-full px-3 py-1 text-xs font-bold backdrop-blur transition-colors ${
+                    handsReady
+                      ? "bg-emerald-500/90 text-emerald-950 font-extrabold shadow-md shadow-emerald-500/20"
+                      : "bg-amber-500/80 text-amber-950 font-bold"
+                  }`}
+                >
+                  {handsReady ? "✓ Đã thấy 2 tay" : "Giữ 2 tay trong khung hình"}
+                </span>
+                {running && (
+                  <span className="rounded-full bg-rose-500/90 px-3.5 py-1 text-xs font-black text-white shadow-md shadow-rose-500/30 border border-rose-400/30">
+                    ⏱ {time}s
+                  </span>
+                )}
+              </div>
+            )}
 
+            {/* Last Hit Animation Overlay */}
             {lastHit !== null && (
               <div key={`${shots}-${lastHit}`} className="pointer-events-none absolute inset-0 grid place-items-center">
                 <div
-                  className={`animate-bounce rounded-full px-5 py-3 text-3xl font-black shadow-xl ${
-                    lastHit === 10 ? "bg-yellow-300 text-yellow-950" : lastHit > 0 ? "bg-white text-slate-950" : "bg-rose-500"
+                  className={`animate-bounce rounded-full px-6 py-3 text-3xl font-black shadow-2xl border ${
+                    lastHit === 10
+                      ? "bg-yellow-400 text-yellow-950 border-yellow-200 shadow-yellow-500/50"
+                      : lastHit > 0
+                      ? "bg-white text-slate-950 border-slate-200"
+                      : "bg-rose-500 text-white border-rose-300"
                   }`}
                 >
                   {lastHit === 10 ? "TÂM BIA! +10" : `+${lastHit}`}
@@ -402,47 +522,63 @@ export default function App() {
             )}
           </div>
 
-          <aside id="game-sidebar" className="grid grid-cols-2 gap-3 lg:grid-cols-1">
-            <div id="score-card" className="rounded-3xl bg-gradient-to-br from-cyan-400 to-blue-500 p-5 text-slate-950">
-              <p className="text-xs font-black uppercase tracking-widest">Tổng điểm</p>
-              <p className="mt-1 text-5xl font-black">{score}</p>
-              <p className="mt-2 text-sm font-bold">{shots} phát bắn</p>
-            </div>
-            <div id="best-score-card" className="rounded-3xl border border-white/10 bg-slate-900 p-5">
-              <div className="flex items-center gap-2 text-yellow-300">
-                <Trophy size={18} />
-                <p className="text-xs font-black uppercase tracking-widest">Kỷ lục</p>
-              </div>
-              <p className="mt-2 text-3xl font-black">{best}</p>
-            </div>
-            <div id="instructions-card" className="col-span-2 rounded-3xl border border-white/10 bg-slate-900 p-5 lg:col-span-1">
-              <p className="mb-3 text-sm font-bold text-slate-300">Cách chơi</p>
-              <ol className="space-y-2 text-sm text-slate-400">
-                <li><b className="text-white">1.</b> Dùng ngón trỏ của một tay để đưa tâm ngắm vào bia.</li>
-                <li><b className="text-white">2.</b> Tay kia chụm ngón cái và ngón trỏ để bắn.</li>
-                <li><b className="text-white">3.</b> Nhả hai ngón rồi chụm lại cho phát tiếp theo.</li>
-              </ol>
-            </div>
+          {/* Sidebar Controls */}
+          <aside id="game-sidebar" className="flex flex-col gap-3">
             <button
               id="start-round-btn"
               onClick={startRound}
-              className="col-span-2 flex items-center justify-center gap-2 rounded-3xl bg-white px-5 py-4 font-black text-slate-950 hover:bg-cyan-100 lg:col-span-1 cursor-pointer transition-colors"
+              className="flex w-full items-center justify-center gap-2 rounded-3xl bg-gradient-to-r from-white to-slate-100 px-5 py-4 font-black text-slate-950 hover:from-cyan-100 hover:to-white cursor-pointer transition-all shadow-xl text-base"
             >
               {running ? (
                 <>
-                  <RotateCcw size={19} /> Chơi lại
+                  <RotateCcw size={20} /> Chơi lại vòng mới
                 </>
               ) : (
                 <>
-                  <Crosshair size={19} /> Bắt đầu 45 giây
+                  <Crosshair size={20} /> Bắt đầu 45 giây
                 </>
               )}
             </button>
+
+            <div className="grid grid-cols-2 lg:grid-cols-1 gap-3">
+              <div id="score-card" className="rounded-3xl bg-gradient-to-br from-cyan-400 to-blue-500 p-5 text-slate-950 shadow-lg shadow-cyan-500/10">
+                <p className="text-[11px] font-black uppercase tracking-widest text-slate-900/70">Tổng điểm</p>
+                <p className="mt-1 text-5xl font-black tracking-tight">{score}</p>
+                <p className="mt-2 text-xs font-bold opacity-80">{shots} phát đã bắn</p>
+              </div>
+
+              <div id="best-score-card" className="rounded-3xl border border-white/10 bg-slate-900/80 p-5">
+                <div className="flex items-center gap-2 text-yellow-400">
+                  <Trophy size={18} />
+                  <p className="text-[11px] font-black uppercase tracking-widest">Kỷ lục</p>
+                </div>
+                <p className="mt-1 text-3xl font-black text-white">{best}</p>
+              </div>
+            </div>
+
+            <div id="instructions-card" className="rounded-3xl border border-white/10 bg-slate-900/60 p-4">
+              <p className="mb-2 text-xs font-bold uppercase tracking-wider text-cyan-400">Hướng dẫn ngắm bắn</p>
+              <ol className="space-y-2 text-xs text-slate-300">
+                <li className="flex items-start gap-2">
+                  <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-cyan-500/20 text-[10px] font-bold text-cyan-300">1</span>
+                  <span>Dùng <b>ngón trỏ</b> một tay để di chuyển tâm ngắm.</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-cyan-500/20 text-[10px] font-bold text-cyan-300">2</span>
+                  <span>Tay còn lại <b>chụm ngón cái & ngón trỏ</b> để phát bắn.</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-cyan-500/20 text-[10px] font-bold text-cyan-300">3</span>
+                  <span>Thả tay rồi chụm lại để bắn mũi tên tiếp theo.</span>
+                </li>
+              </ol>
+            </div>
           </aside>
         </section>
-        <p id="game-footer-status" className="mt-3 text-center text-xs text-slate-500">
-          {status} • Xử lý hình ảnh diễn ra trực tiếp trong trình duyệt.
-        </p>
+
+        <footer id="game-footer" className="mt-4 text-center text-xs text-slate-500">
+          <p>{status} • Xử lý AI diễn ra 100% trong trình duyệt của bạn.</p>
+        </footer>
       </div>
     </main>
   );
