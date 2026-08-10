@@ -1,0 +1,10 @@
+{
+  "name": "Camera Archery",
+  "description": "Camera-based motion archery game using hand gesture tracking with MediaPipe.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
