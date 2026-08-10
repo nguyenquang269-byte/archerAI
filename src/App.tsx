@@ -68,7 +68,13 @@ export default function App() {
   const [muted, setMuted] = useState(false);
   const [score, setScore] = useState(0);
   const [shots, setShots] = useState(0);
-  const [best, setBest] = useState(() => Number(localStorage.getItem("camera-archery-best") || 0));
+  const [best, setBest] = useState(() => {
+    try {
+      return Number(localStorage.getItem("camera-archery-best") || 0);
+    } catch {
+      return 0;
+    }
+  });
   const [time, setTime] = useState(ROUND_SECONDS);
   const [lastHit, setLastHit] = useState<number | null>(null);
   const [handsReady, setHandsReady] = useState(false);
@@ -468,7 +474,11 @@ export default function App() {
   useEffect(() => {
     if (!running && score > best) {
       setBest(score);
-      localStorage.setItem("camera-archery-best", String(score));
+      try {
+        localStorage.setItem("camera-archery-best", String(score));
+      } catch (e) {
+        console.warn("Could not save score to localStorage:", e);
+      }
     }
   }, [running, score, best]);
 
