@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { FilesetResolver, HandLandmarker, HandLandmarkerResult } from "@mediapipe/tasks-vision";
-import { Camera, Crosshair, RotateCcw, Trophy, Volume2, VolumeX } from "lucide-react";
+import { Camera, Crosshair, MousePointer, RotateCcw, Trophy, Volume2, VolumeX } from "lucide-react";
 
 interface Point {
   x: number;
@@ -74,6 +74,7 @@ export default function App() {
   const [handsReady, setHandsReady] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [mouseMode, setMouseMode] = useState(false);
 
   const isStartingRef = useRef<boolean>(false);
 
@@ -122,21 +123,58 @@ export default function App() {
     ctx.fillText("10", target.x, target.y);
   };
 
+  const shootAt = (x: number, y: number) => {
+    const hitScore = scoreAt(x, y, targetRef.current);
+    const mark = { x, y, score: hitScore, born: performance.now() };
+    shotsRef.current = [...shotsRef.current.slice(-7), mark];
+    setShots((n) => n + 1);
+    setScore((n) => n + hitScore);
+    setLastHit(hitScore);
+    beep(hitScore, mutedRef.current);
+    setTimeout(moveTarget, 220);
+  };
+
   const draw = (results: HandLandmarkerResult | null) => {
     const canvas = canvasRef.current;
-    const video = videoRef.current;
-    if (!canvas || !video) return;
+    if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
     ctx.clearRect(0, 0, rect.width, rect.height);
-    ctx.save();
-    ctx.scale(-1, 1);
-    ctx.drawImage(video, -rect.width, 0, rect.width, rect.height);
-    ctx.restore();
-    ctx.fillStyle = "rgba(2,6,23,.18)";
-    ctx.fillRect(0, 0, rect.width, rect.height);
+
+    const video = videoRef.current;
+    if (cameraActive && video && video.readyState >= 2) {
+      ctx.save();
+      ctx.scale(-1, 1);
+      ctx.drawImage(video, -rect.width, 0, rect.width, rect.height);
+      ctx.restore();
+      ctx.fillStyle = "rgba(2,6,23,.18)";
+      ctx.fillRect(0, 0, rect.width, rect.height);
+    } else {
+      // Virtual archery range background for mouse/touch mode
+      const grad = ctx.createRadialGradient(rect.width / 2, rect.height / 2, 50, rect.width / 2, rect.height / 2, rect.width);
+      grad.addColorStop(0, "#0f172a");
+      grad.addColorStop(1, "#020617");
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, rect.width, rect.height);
+
+      // Grid pattern
+      ctx.strokeStyle = "rgba(255,255,255,0.04)";
+      ctx.lineWidth = 1;
+      for (let x = 0; x < rect.width; x += 40) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, rect.height);
+        ctx.stroke();
+      }
+      for (let y = 0; y < rect.height; y += 40) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(rect.width, y);
+        ctx.stroke();
+      }
+    }
 
     drawTarget(ctx, targetRef.current);
 
@@ -153,33 +191,39 @@ export default function App() {
       aimHand = hands[0];
     }
 
-    hands.forEach((hand, hi) => {
-      ctx.strokeStyle = hi === 0 ? "#67e8f9" : "#c4b5fd";
-      ctx.lineWidth = 3;
-      [0, 5, 9, 13, 17].forEach((idx) => {
-        const p = hand[idx];
-        ctx.beginPath();
-        ctx.arc((1 - p.x) * rect.width, p.y * rect.height, 5, 0, Math.PI * 2);
-        ctx.fillStyle = ctx.strokeStyle;
-        ctx.fill();
+    if (cameraActive) {
+      hands.forEach((hand, hi) => {
+        ctx.strokeStyle = hi === 0 ? "#67e8f9" : "#c4b5fd";
+        ctx.lineWidth = 3;
+        [0, 5, 9, 13, 17].forEach((idx) => {
+          const p = hand[idx];
+          ctx.beginPath();
+          ctx.arc((1 - p.x) * rect.width, p.y * rect.height, 5, 0, Math.PI * 2);
+          ctx.fillStyle = ctx.strokeStyle;
+          ctx.fill();
+        });
+        [4, 8].forEach((idx) => {
+          const p = hand[idx];
+          ctx.beginPath();
+          ctx.arc((1 - p.x) * rect.width, p.y * rect.height, 8, 0, Math.PI * 2);
+          ctx.stroke();
+        });
       });
-      [4, 8].forEach((idx) => {
-        const p = hand[idx];
-        ctx.beginPath();
-        ctx.arc((1 - p.x) * rect.width, p.y * rect.height, 8, 0, Math.PI * 2);
-        ctx.stroke();
-      });
-    });
 
-    if (aimHand) {
-      const tip = aimHand[8];
-      const raw = { x: (1 - tip.x) * rect.width, y: tip.y * rect.height };
-      aimRef.current = {
-        x: aimRef.current.x ? aimRef.current.x * 0.68 + raw.x * 0.32 : raw.x,
-        y: aimRef.current.y ? aimRef.current.y * 0.68 + raw.y * 0.32 : raw.y,
-      };
-      const a = aimRef.current;
-      ctx.strokeStyle = "rgba(255,255,255,.55)";
+      if (aimHand) {
+        const tip = aimHand[8];
+        const raw = { x: (1 - tip.x) * rect.width, y: tip.y * rect.height };
+        aimRef.current = {
+          x: aimRef.current.x ? aimRef.current.x * 0.68 + raw.x * 0.32 : raw.x,
+          y: aimRef.current.y ? aimRef.current.y * 0.68 + raw.y * 0.32 : raw.y,
+        };
+      }
+    }
+
+    // Always draw crosshair if aimRef has coordinates
+    const a = aimRef.current;
+    if (a.x > 0 || a.y > 0) {
+      ctx.strokeStyle = mouseMode ? "rgba(34,211,238,0.8)" : "rgba(255,255,255,.65)";
       ctx.setLineDash([6, 7]);
       ctx.beginPath();
       ctx.moveTo(a.x - 70, a.y);
@@ -190,24 +234,18 @@ export default function App() {
       ctx.setLineDash([]);
       ctx.beginPath();
       ctx.arc(a.x, a.y, 17, 0, Math.PI * 2);
-      ctx.strokeStyle = "#fff";
+      ctx.strokeStyle = mouseMode ? "#22d3ee" : "#fff";
       ctx.lineWidth = 3;
       ctx.stroke();
     }
 
-    const pinched = triggerHand ? pinchRatio(triggerHand) < 0.43 : false;
-    if (pinched && !wasPinched.current && triggerHand && aimHand && runningRef.current) {
-      const a = aimRef.current;
-      const hitScore = scoreAt(a.x, a.y, targetRef.current);
-      const mark = { x: a.x, y: a.y, score: hitScore, born: performance.now() };
-      shotsRef.current = [...shotsRef.current.slice(-7), mark];
-      setShots((n) => n + 1);
-      setScore((n) => n + hitScore);
-      setLastHit(hitScore);
-      beep(hitScore, mutedRef.current);
-      setTimeout(moveTarget, 220);
+    if (cameraActive) {
+      const pinched = triggerHand ? pinchRatio(triggerHand) < 0.43 : false;
+      if (pinched && !wasPinched.current && triggerHand && aimHand && runningRef.current) {
+        shootAt(a.x, a.y);
+      }
+      wasPinched.current = pinched;
     }
-    wasPinched.current = pinched;
 
     const now = performance.now();
     shotsRef.current = shotsRef.current.filter((s) => now - s.born < 1300);
@@ -227,16 +265,20 @@ export default function App() {
 
   const loop = async () => {
     const video = videoRef.current;
-    if (video && landmarkerRef.current && video.readyState >= 2) {
+    if (cameraActive && video && landmarkerRef.current && video.readyState >= 2) {
       if (video.currentTime !== lastVideoTime.current) {
         lastVideoTime.current = video.currentTime;
         try {
           const results = landmarkerRef.current.detectForVideo(video, performance.now());
           draw(results);
         } catch (e) {
-          console.warn("Detection frame error:", e);
+          draw(null);
         }
+      } else {
+        draw(null);
       }
+    } else {
+      draw(null);
     }
     rafRef.current = requestAnimationFrame(loop);
   };
@@ -266,7 +308,6 @@ export default function App() {
             audio: false,
           });
         } catch (fallbackErr) {
-          // Fallback to basic video constraints if ideal resolution is rejected
           stream = await navigator.mediaDevices.getUserMedia({
             video: true,
             audio: false,
@@ -286,6 +327,7 @@ export default function App() {
           }
         }
         setCameraActive(true);
+        setMouseMode(false);
       }
 
       setStatus("Đang tải mô hình nhận diện AI...");
@@ -301,7 +343,6 @@ export default function App() {
             minTrackingConfidence: 0.5,
           });
         } catch (gpuError) {
-          console.warn("GPU delegate failed, falling back to CPU:", gpuError);
           landmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
             baseOptions: { modelAssetPath: MODEL_URL, delegate: "CPU" },
             runningMode: "VIDEO",
@@ -341,8 +382,17 @@ export default function App() {
     }
   };
 
+  const startMouseMode = () => {
+    setMouseMode(true);
+    setCameraActive(false);
+    setStatus("Đang chơi bằng Chuột / Cảm ứng");
+    resizeCanvas();
+    cancelAnimationFrame(rafRef.current);
+    loop();
+  };
+
   const startRound = async () => {
-    if (!cameraActive) {
+    if (!cameraActive && !mouseMode) {
       await startCamera();
     }
     setScore(0);
@@ -354,10 +404,39 @@ export default function App() {
     setRunning(true);
   };
 
+  const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!mouseMode) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    aimRef.current = {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+    };
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!mouseMode) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    aimRef.current = { x, y };
+
+    if (runningRef.current) {
+      shootAt(x, y);
+    }
+  };
+
   useEffect(() => {
     resizeCanvas();
     window.addEventListener("resize", resizeCanvas);
     
+    // Start loop immediately so canvas renders smoothly
+    cancelAnimationFrame(rafRef.current);
+    loop();
+
     // Attempt auto camera start
     startCamera(true);
 
@@ -423,6 +502,17 @@ export default function App() {
               {muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
             </button>
             <button
+              id="mouse-mode-btn"
+              onClick={startMouseMode}
+              className={`flex items-center gap-1.5 rounded-2xl px-3.5 py-2.5 text-xs font-bold transition-all cursor-pointer ${
+                mouseMode
+                  ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40"
+                  : "bg-slate-800/80 text-slate-300 hover:bg-slate-700 border border-white/10"
+              }`}
+            >
+              <MousePointer size={15} /> Chế độ Chuột
+            </button>
+            <button
               id="open-camera-btn"
               onClick={() => startCamera()}
               disabled={loading}
@@ -433,7 +523,7 @@ export default function App() {
               } disabled:opacity-50`}
             >
               <Camera size={16} />
-              {loading ? "Đang kết nối..." : cameraActive ? "Đang bật Camera" : "Bật Camera ngay"}
+              {loading ? "Đang kết nối..." : cameraActive ? "Đang bật Camera" : "Bật Camera"}
             </button>
           </div>
         </header>
@@ -443,21 +533,26 @@ export default function App() {
           {/* Main Camera Viewport */}
           <div
             id="viewport-card"
-            className="relative overflow-hidden rounded-3xl border border-white/10 bg-slate-900/90 shadow-2xl min-h-[420px] sm:min-h-[520px] lg:min-h-[600px] flex items-center justify-center"
+            className="relative overflow-hidden rounded-3xl border border-white/10 bg-slate-900/90 shadow-2xl min-h-[420px] sm:min-h-[520px] lg:min-h-[600px] flex items-center justify-center cursor-crosshair"
           >
             <video ref={videoRef} className="hidden" playsInline muted />
-            <canvas ref={canvasRef} className="h-full w-full object-cover" />
+            <canvas
+              ref={canvasRef}
+              onPointerMove={handlePointerMove}
+              onPointerDown={handlePointerDown}
+              className="h-full w-full object-cover touch-none"
+            />
 
-            {/* Overlay when Camera is NOT active */}
-            {!cameraActive && (
+            {/* Overlay when Camera is NOT active and NOT in mouse mode */}
+            {!cameraActive && !mouseMode && (
               <div id="camera-overlay-prompt" className="absolute inset-0 grid place-items-center bg-slate-950/90 p-6 text-center backdrop-blur-md">
                 <div className="max-w-md">
                   <div className="mx-auto mb-4 grid h-20 w-20 place-items-center rounded-3xl bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 shadow-inner">
                     <Camera size={38} />
                   </div>
-                  <h2 className="text-2xl font-black tracking-tight">Cần quyền Camera để trải nghiệm</h2>
+                  <h2 className="text-2xl font-black tracking-tight">Sẵn sàng trải nghiệm Cung thủ AI</h2>
                   <p className="mt-2 text-sm text-slate-300 leading-relaxed">
-                    Trò chơi sử dụng camera để nhận diện chuyển động bàn tay trực tiếp trong trình duyệt. Không có dữ liệu video nào được lưu lại.
+                    Trò chơi sử dụng camera để nhận diện chuyển động cử chỉ tay trực tiếp trong trình duyệt.
                   </p>
 
                   {cameraError && (
@@ -466,43 +561,60 @@ export default function App() {
                     </div>
                   )}
 
-                  <button
-                    id="enable-camera-btn"
-                    onClick={() => startCamera()}
-                    disabled={loading}
-                    className="mt-6 w-full rounded-2xl bg-gradient-to-r from-cyan-400 to-blue-500 py-3.5 px-6 font-black text-slate-950 shadow-lg shadow-cyan-500/25 hover:from-cyan-300 hover:to-blue-400 disabled:opacity-50 cursor-pointer transition-all text-sm"
-                  >
-                    {loading ? "Đang kết nối camera & AI..." : "Cho phép & Bật Camera"}
-                  </button>
+                  <div className="mt-6 flex flex-col sm:flex-row gap-3">
+                    <button
+                      id="enable-camera-btn"
+                      onClick={() => startCamera()}
+                      disabled={loading}
+                      className="flex-1 rounded-2xl bg-gradient-to-r from-cyan-400 to-blue-500 py-3.5 px-4 font-black text-slate-950 shadow-lg shadow-cyan-500/25 hover:from-cyan-300 hover:to-blue-400 disabled:opacity-50 cursor-pointer transition-all text-sm"
+                    >
+                      {loading ? "Đang mở..." : "Mở Camera ngay"}
+                    </button>
+
+                    <button
+                      id="enable-mouse-btn"
+                      onClick={startMouseMode}
+                      className="rounded-2xl bg-slate-800 border border-white/10 px-4 py-3.5 text-xs font-bold text-slate-200 hover:bg-slate-700 cursor-pointer transition-colors"
+                    >
+                      Chơi bằng Chuột / Cảm ứng
+                    </button>
+                  </div>
                   <p className="mt-3 text-[11px] text-slate-500">
-                    Nên dùng trên trình duyệt Chrome, Edge hoặc Safari
+                    Hỗ trợ tất cả trình duyệt web, máy tính & điện thoại
                   </p>
                 </div>
               </div>
             )}
 
             {/* HUD Status Badges on Top Left of Camera */}
-            {cameraActive && (
-              <div id="status-badges" className="absolute left-4 top-4 flex flex-wrap gap-2 pointer-events-none">
-                <span className="flex items-center gap-1.5 rounded-full bg-slate-900/80 px-3 py-1 text-xs font-bold text-slate-200 border border-white/10 backdrop-blur">
-                  <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span> LIVE
-                </span>
-                <span
-                  className={`rounded-full px-3 py-1 text-xs font-bold backdrop-blur transition-colors ${
-                    handsReady
-                      ? "bg-emerald-500/90 text-emerald-950 font-extrabold shadow-md shadow-emerald-500/20"
-                      : "bg-amber-500/80 text-amber-950 font-bold"
-                  }`}
-                >
-                  {handsReady ? "✓ Đã thấy 2 tay" : "Giữ 2 tay trong khung hình"}
-                </span>
-                {running && (
-                  <span className="rounded-full bg-rose-500/90 px-3.5 py-1 text-xs font-black text-white shadow-md shadow-rose-500/30 border border-rose-400/30">
-                    ⏱ {time}s
+            <div id="status-badges" className="absolute left-4 top-4 flex flex-wrap gap-2 pointer-events-none">
+              {cameraActive ? (
+                <>
+                  <span className="flex items-center gap-1.5 rounded-full bg-slate-900/80 px-3 py-1 text-xs font-bold text-slate-200 border border-white/10 backdrop-blur">
+                    <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span> CAMERA AI
                   </span>
-                )}
-              </div>
-            )}
+                  <span
+                    className={`rounded-full px-3 py-1 text-xs font-bold backdrop-blur transition-colors ${
+                      handsReady
+                        ? "bg-emerald-500/90 text-emerald-950 font-extrabold shadow-md shadow-emerald-500/20"
+                        : "bg-amber-500/80 text-amber-950 font-bold"
+                    }`}
+                  >
+                    {handsReady ? "✓ Đã thấy 2 tay" : "Giữ 2 tay trong khung hình"}
+                  </span>
+                </>
+              ) : mouseMode ? (
+                <span className="flex items-center gap-1.5 rounded-full bg-cyan-500/20 px-3 py-1 text-xs font-bold text-cyan-300 border border-cyan-500/30 backdrop-blur">
+                  <MousePointer size={13} /> Chế độ Chuột / Touch (Rê chuột & Bấm để bắn)
+                </span>
+              ) : null}
+
+              {running && (
+                <span className="rounded-full bg-rose-500/90 px-3.5 py-1 text-xs font-black text-white shadow-md shadow-rose-500/30 border border-rose-400/30">
+                  ⏱ {time}s
+                </span>
+              )}
+            </div>
 
             {/* Last Hit Animation Overlay */}
             {lastHit !== null && (
@@ -557,21 +669,36 @@ export default function App() {
             </div>
 
             <div id="instructions-card" className="rounded-3xl border border-white/10 bg-slate-900/60 p-4">
-              <p className="mb-2 text-xs font-bold uppercase tracking-wider text-cyan-400">Hướng dẫn ngắm bắn</p>
-              <ol className="space-y-2 text-xs text-slate-300">
-                <li className="flex items-start gap-2">
-                  <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-cyan-500/20 text-[10px] font-bold text-cyan-300">1</span>
-                  <span>Dùng <b>ngón trỏ</b> một tay để di chuyển tâm ngắm.</span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-cyan-500/20 text-[10px] font-bold text-cyan-300">2</span>
-                  <span>Tay còn lại <b>chụm ngón cái & ngón trỏ</b> để phát bắn.</span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-cyan-500/20 text-[10px] font-bold text-cyan-300">3</span>
-                  <span>Thả tay rồi chụm lại để bắn mũi tên tiếp theo.</span>
-                </li>
-              </ol>
+              <p className="mb-2 text-xs font-bold uppercase tracking-wider text-cyan-400">
+                {mouseMode ? "Cách chơi Chuột / Touch" : "Cách chơi Cử chỉ Camera"}
+              </p>
+              {mouseMode ? (
+                <ol className="space-y-2 text-xs text-slate-300">
+                  <li className="flex items-start gap-2">
+                    <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-cyan-500/20 text-[10px] font-bold text-cyan-300">1</span>
+                    <span>Di chuyển chuột / ngón tay trên màn hình để di tâm ngắm.</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-cyan-500/20 text-[10px] font-bold text-cyan-300">2</span>
+                    <span>Bấm chuột hoặc chạm màn hình để bắn tên vào bia.</span>
+                  </li>
+                </ol>
+              ) : (
+                <ol className="space-y-2 text-xs text-slate-300">
+                  <li className="flex items-start gap-2">
+                    <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-cyan-500/20 text-[10px] font-bold text-cyan-300">1</span>
+                    <span>Dùng <b>ngón trỏ</b> một tay để di chuyển tâm ngắm.</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-cyan-500/20 text-[10px] font-bold text-cyan-300">2</span>
+                    <span>Tay còn lại <b>chụm ngón cái & ngón trỏ</b> để phát bắn.</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-cyan-500/20 text-[10px] font-bold text-cyan-300">3</span>
+                    <span>Thả tay rồi chụm lại để bắn mũi tên tiếp theo.</span>
+                  </li>
+                </ol>
+              )}
             </div>
           </aside>
         </section>
